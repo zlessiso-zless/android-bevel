@@ -22,11 +22,3 @@ jobs:
 
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
-        env:
-          ORG_GRADLE_PROJECT_jvmargs: "-Xmx3072m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
-
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bevel-android-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
