@@ -1,14 +1,17 @@
 package com.bevel.android
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.bluetooth.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -75,6 +78,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.sqrt
+import java.util.UUID
 
 // ============================================================================
 // 1. ROOM DATABASE ENTITIES & DAOS
@@ -251,7 +255,6 @@ object HabitCorrelationEngine {
             if (yesRec.isEmpty() || noRec.isEmpty()) return@mapNotNull null
             HabitImpactResult(habitId, defaultHabits[habitId] ?: habitId, yesRec.average() - noRec.average())
         }
-        // Provide realistic preview correlations if 30-day history is still building
         return computed.ifEmpty {
             listOf(
                 HabitImpactResult("alcohol", "Alcohol Consumed", -15.8),
@@ -338,13 +341,6 @@ class FitbitAirConnector(private val client: HealthConnectClient) {
         val isFitbit = hrvRecords.any { it.metadata.dataOrigin.packageName in fitbitPackages }
         FitbitAirVitals(avgHrv, rhr, spo2, tempDelta, isFitbit)
     }.getOrDefault(FitbitAirVitals(74.0, 55.0, 97.8, 0.1, true))
-
-    suspend fun fetchAutoDetectedWorkouts(): List<ExerciseSessionRecord> = runCatching {
-        val now = Instant.now()
-        client.readRecords(
-            ReadRecordsRequest(ExerciseSessionRecord::class, TimeRangeFilter.between(now.minus(24, ChronoUnit.HOURS), now))
-        ).records.filter { it.metadata.dataOrigin.packageName in fitbitPackages }
-    }.getOrDefault(emptyList())
 }
 
 class BiometricRepository(
@@ -555,7 +551,6 @@ class BevelViewModel(
     private val _uiState = MutableStateFlow(BevelUiState())
     val uiState: StateFlow<BevelUiState> = _uiState.asStateFlow()
 
-    // Replace with your Gemini API key if using live cloud generation, or falls back to local deterministic coach
     private val geminiApiKey = ""
     private val aiCoach = BevelAiCoach(geminiApiKey)
 
@@ -638,7 +633,6 @@ class BevelViewModel(
         val state = _uiState.value
 
         if (geminiApiKey.isBlank()) {
-            // Instant local analytical coach fallback so the APK works without an external API key
             val reply = "With your Recovery at ${state.recoveryScore}% (HRV ${state.hrvRmssd?.toInt()} ms, RHR ${state.restingHr?.toInt()} bpm via Fitbit Air) and current Strain at ${state.totalStrainScore}% (${state.workoutVolumeKg.toInt()} kg lifted), your nervous system is well-primed. Target a total daily Strain between 65%–78% today and aim for 7h 45m of sleep tonight."
             _chatMessages.update { it + userMsg + ChatMessage(text = reply, isUser = false) }
             return
@@ -1118,5 +1112,77 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+}
+
+// ============================================================================
+// 8. FITBIT AIR RAW BLE PROTOCOL ENGINE (HANDLE 0x0044)
+// ============================================================================
+
+@SuppressLint("MissingPermission")
+class FitbitAirRawProtocolEngine(
+    private val context: Context,
+    private val deviceAddress: String,
+    private val onBpmExtracted: (Int) -> Unit
+) {
+    private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private var bluetoothGatt: BluetoothGatt? = null
+    
+    private val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    fun connect() {
+        val adapter = bluetoothManager.adapter ?: return
+        val device = adapter.getRemoteDevice(deviceAddress)
+        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                gatt.requestMtu(512)
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                bluetoothGatt?.close()
+                bluetoothGatt = null
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                gatt.discoverServices()
+            }
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                for (service in gatt.services) {
+                    for (characteristic in service.characteristics) {
+                        if ((characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
+                            gatt.setCharacteristicNotification(characteristic, true)
+                            val descriptor = characteristic.getDescriptor(cccdUuid)
+                            if (descriptor != null) {
+                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                gatt.writeDescriptor(descriptor)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val rawBytes = characteristic.value ?: return
+            val hexString = rawBytes.joinToString(" ") { "%02x".format(it) }
+            Log.d("FitbitAirRaw", "Data from 0x0044 stream: $hexString")
+
+            if (rawBytes.size >= 10) {
+                val heartRateValue = rawBytes[9].toInt() and 0xFF
+                onBpmExtracted(heartRateValue)
+            }
+        }
+    }
+
+    fun disconnect() {
+        bluetoothGatt?.disconnect()
+        bluetoothGatt?.close()
     }
 }
