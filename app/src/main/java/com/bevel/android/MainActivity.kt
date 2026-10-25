@@ -1171,10 +1171,13 @@ class FitbitAirRawProtocolEngine(
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val rawBytes = characteristic.value ?: return
+            
+            // Log the raw hex stream coming from the device
             val hexString = rawBytes.joinToString(" ") { "%02x".format(it) }
-            Log.d("FitbitAirRaw", "Data from 0x0044 stream: $hexString")
+            Log.d("FitbitAirRaw", "Data from 0x0044 stream: $hexString (length: ${rawBytes.size})")
 
-            if (rawBytes.size >= 10) {
+            // Ensure the packet is large enough before reading index offset safely
+            if (rawBytes.size > 9) {
                 val heartRateValue = rawBytes[9].toInt() and 0xFF
                 onBpmExtracted(heartRateValue)
             }
