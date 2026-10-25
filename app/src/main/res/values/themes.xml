@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Material3.Dark.NoActionBar" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E0E10</item>
+    </style>
+</resources>
